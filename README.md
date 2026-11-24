@@ -491,28 +491,6 @@ Example test modules include:
 
 ---
 
-## 🚧 Project Status
 
-**Status: Active Development**
-
-SentinelMesh Studio is currently being developed and enhanced. Features and architecture may evolve as new agents, integrations, and workflow capabilities are introduced.
-
----
-
-## 👥 Team
-
-Developed as an AI workflow automation project.
-
-*Add team members and contributor details here.*
-
----
-
-
-
-<div align="center">
-
-### SentinelMesh Studio
-
-**Intelligent workflows that understand, adapt, and recover.** 🛡️
 
 </div>
