@@ -48,6 +48,21 @@ class SendEmailAgent(BaseAgent):
         subject = str(state.get("email_subject") or config.get("subject") or "SentinelMesh Notification").strip()
         body = self._resolve_body(state, config)
 
+        if config.get("demoMode"):
+            if not recipient:
+                recipient = str(config.get("demoRecipient") or "demo@example.com")
+            state["recipient_email"] = recipient
+            state["email_subject"] = subject
+            state["email_sent"] = True
+            state["email_status"] = "demo"
+            state["email_error"] = None
+            state["email_payload"] = {"to": recipient, "subject": subject, "body": body}
+            state["execution_status"] = "completed"
+            state.setdefault("execution_log", []).append(
+                f"{datetime.now(timezone.utc).isoformat()} Send Email completed in demo mode for {recipient}."
+            )
+            return state
+
         if not self._validate_recipient(recipient):
             state["email_sent"] = False
             state["email_sent_at"] = None

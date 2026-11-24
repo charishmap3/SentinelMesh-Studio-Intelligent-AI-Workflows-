@@ -166,6 +166,10 @@ function App() {
     errorMessage,
     workflowId,
     savedWorkflows,
+    executionContext,
+    approveCurrent,
+    rejectCurrent,
+    resetExecutionState,
   } = useWorkflow();
 
   const { theme, toggleTheme } = useTheme();
@@ -305,6 +309,7 @@ function App() {
   };
 
   const handleSelectTemplate = (template: (typeof workflowTemplates)[number]) => {
+    resetExecutionState();
     setName(template.initialName ?? template.name);
     setWorkflowId(null);
     setNodes(template.nodes);
@@ -556,7 +561,28 @@ function App() {
                 </section>
 
                 <PropertiesPanel selectedNode={selectedNode} onUpdateNode={updateNode} />
-                <ExecutionPanel result={executionResult} isExecuting={isExecuting} errorMessage={errorMessage} />
+                <ExecutionPanel
+                  result={executionResult}
+                  isExecuting={isExecuting}
+                  errorMessage={errorMessage}
+                  nodes={animatedNodes}
+                  executeWorkflow={executeWorkflow}
+                  onApprove={async (approver?: string, reason?: string) => {
+                    try {
+                      await approveCurrent?.(approver, reason);
+                    } catch (e) {
+                      // ignore
+                    }
+                  }}
+                  onReject={async (rejectedBy?: string, reason?: string) => {
+                    try {
+                      await rejectCurrent?.(rejectedBy, reason);
+                    } catch (e) {
+                      // ignore
+                    }
+                  }}
+                  executionContext={executionContext}
+                />
               </div>
             </div>
           </aside>

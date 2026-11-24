@@ -10,6 +10,15 @@ export type WorkflowNodeData = {
   folder?: string;
   unreadOnly?: boolean;
   subjectFilter?: string;
+  scheduleType?: 'interval' | 'once' | 'cron';
+  intervalMinutes?: number;
+  cronExpression?: string;
+  fileReference?: string;
+  fileName?: string;
+  fileMimeType?: string;
+  fileSize?: number;
+  fileLastModified?: number;
+  fileContentBase64?: string;
   gmailConnected?: boolean;
   gmailConnectionStatus?: string;
   provider?: string;
@@ -21,6 +30,7 @@ export type WorkflowNodeData = {
   categories?: string[];
   extractionFields?: string[];
   instructions?: string;
+  approverEmail?: string;
   recipientEmail?: string;
   subject?: string;
   body?: string;
@@ -52,6 +62,15 @@ export type WorkflowNodeField =
   | 'folder'
   | 'unreadOnly'
   | 'subjectFilter'
+  | 'scheduleType'
+  | 'intervalMinutes'
+  | 'cronExpression'
+  | 'fileReference'
+  | 'fileName'
+  | 'fileMimeType'
+  | 'fileSize'
+  | 'fileLastModified'
+  | 'fileContentBase64'
   | 'gmailConnectionStatus'
   | 'provider'
   | 'model'
@@ -62,6 +81,7 @@ export type WorkflowNodeField =
   | 'categories'
   | 'extractionFields'
   | 'instructions'
+  | 'approverEmail'
   | 'recipientEmail'
   | 'subject'
   | 'body'
@@ -100,6 +120,8 @@ export type WorkflowStorageEnvelope = {
 };
 
 export type WorkflowExecutionResult = {
+  execution_id?: string;
+  workflow_id?: string;
   execution_status: string;
   workflow_health: string;
   workflow_summary: string;
@@ -107,8 +129,10 @@ export type WorkflowExecutionResult = {
   failed_stages: string[];
   skipped_stages?: string[];
   executed_node_ids?: string[];
+  completed_node_ids?: string[];
   failed_node_ids?: string[];
   skipped_node_ids?: string[];
+  pending_node_ids?: string[];
   current_node_id?: string | null;
   failure_category?: string;
   failure_severity?: string;
@@ -123,6 +147,38 @@ export type WorkflowExecutionResult = {
   recommended_resolution: string;
   healing_strategy: string;
   healing_status: string;
+  supervisor_summary?: string;
+  supervisor_metrics?: {
+    total_execution_time_ms: number;
+    average_node_latency_ms: number;
+    completed_nodes: number;
+    failed_nodes: number;
+    pending_nodes: number;
+    skipped_nodes: number;
+    retry_count: number;
+    workflow_completion_pct: number;
+    current_running_node?: string;
+  };
+  supervisor_timeline?: Array<{
+    timestamp?: string;
+    event?: string;
+    status?: string;
+    detail?: string;
+  }>;
+  supervisor_node_details?: Array<{
+    node_id?: string;
+    node_name?: string;
+    node_type?: string;
+    start_time?: string;
+    end_time?: string;
+    duration_ms?: number;
+    status?: string;
+    warning?: string;
+    error?: string;
+    retry_count?: number;
+    output_summary?: string;
+  }>;
+  node_details?: WorkflowExecutionResult['supervisor_node_details'];
   node_outputs?: Array<{
     node_id?: string | null;
     node_type?: string;

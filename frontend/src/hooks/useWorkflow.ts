@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { type Connection, addEdge, useEdgesState, useNodesState } from 'reactflow';
-import { executeWorkflow, listWorkflows, saveWorkflow } from '../services/api';
+import { executeWorkflow, listWorkflows, saveWorkflow, updateWorkflow, approveWorkflow, rejectWorkflow } from '../services/api';
 import { deleteWorkflowFromStorage, duplicateWorkflowInStorage, listWorkflowsFromStorage, loadWorkflowFromStorage, renameWorkflowInStorage, saveWorkflowToStorage, exportWorkflowJson, normalizeWorkflowEdges } from '../services/workflowStorage';
 import { getNodeExecutionState, getVisualExecutionState } from './executionState';
 import type { SavedWorkflow, WorkflowEdge, WorkflowExecutionResult, WorkflowNode, WorkflowNodeData, WorkflowNodeField, WorkflowNodeValue, WorkflowPayload } from '../types/workflow';
 import { normalizeClassifierCategory } from '../utils/classifierHandles';
+import { toStructuredLogs } from '../utils/structuredLogs';
 
 const initialNodes: WorkflowNode[] = [
   {
@@ -44,6 +45,20 @@ type ExecutionAnimationState = {
   skippedNodeIds: string[];
 };
 
+const emptyExecutionContext = () => ({
+  currentNode: null as string | null,
+  paused: false,
+  waitingApproval: false,
+  completedNodes: [] as string[],
+  pendingNodes: [] as string[],
+  failedNodes: [] as string[],
+  timeline: [] as Array<{ nodeId: string; label?: string; start?: string | null; end?: string | null; duration?: number | null; status?: string }>,
+  executionLogs: [] as Array<any>,
+  supervisorMetrics: {} as Record<string, any>,
+  approvalState: null as null | Record<string, any>,
+  executionMetrics: {} as Record<string, any>,
+});
+
 export function useWorkflow() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -57,6 +72,9 @@ export function useWorkflow() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [executionAnimation, setExecutionAnimation] = useState<ExecutionAnimationState | null>(null);
   const replayTimeoutRef = useRef<number | null>(null);
+
+  // NEW: execution context maintains live monitoring state, structured logs, supervisor metrics, approval state
+  const [executionContext, setExecutionContext] = useState(emptyExecutionContext);
 
   const workflowSummary = useMemo(() => ({
     nodes: nodes.length,
@@ -202,6 +220,7 @@ export function useWorkflow() {
       description,
       config,
       kind,
+      ...(kind === 'scheduler' ? { scheduleType: 'interval', intervalMinutes: 1 } : {}),
       ...(kind === 'email-trigger'
         ? {
             emailAccount: 'you@example.com',
@@ -315,6 +334,13 @@ export function useWorkflow() {
     setErrorMessage(null);
   };
 
+  const resetExecutionState = () => {
+    setExecutionResult(null);
+    setExecutionAnimation(null);
+    setExecutionContext(emptyExecutionContext());
+    setErrorMessage(null);
+  };
+
   const refreshSavedWorkflows = () => {
     setSavedWorkflows(listWorkflowsFromStorage());
   };
@@ -399,7 +425,16 @@ export function useWorkflow() {
     };
 
     try {
-      const savedWorkflow = await saveWorkflow(payload);
+      let savedWorkflow: Awaited<ReturnType<typeof saveWorkflow>>;
+      if (workflowId) {
+        try {
+          savedWorkflow = await updateWorkflow(workflowId, payload);
+        } catch {
+          savedWorkflow = await saveWorkflow(payload);
+        }
+      } else {
+        savedWorkflow = await saveWorkflow(payload);
+      }
       saveWorkflowToStorage(nodes, edges, { workflowId: savedWorkflow.workflow_id, name: workflowName, description: payload.description });
       setWorkflowId(savedWorkflow.workflow_id);
       setName(workflowName);
@@ -482,13 +517,11 @@ export function useWorkflow() {
   const executeWorkflowFromBackend = async () => {
     let currentWorkflowId = workflowId;
 
-    if (!currentWorkflowId) {
-      try {
-        currentWorkflowId = await handleSaveWorkflow();
-      } catch {
-        setStatus('Execution unavailable');
-        return;
-      }
+    try {
+      currentWorkflowId = await handleSaveWorkflow();
+    } catch {
+      setStatus('Execution unavailable');
+      return;
     }
 
     setIsExecuting(true);
@@ -496,8 +529,49 @@ export function useWorkflow() {
 
     try {
       const result = await executeWorkflow(currentWorkflowId);
-      console.log(result);
+      // set raw result
       setExecutionResult(result);
+
+      // build structured logs and execution context
+      const structured = toStructuredLogs(result.execution_log);
+
+      // compute basic lists
+      const completed = Array.from(new Set((result.executed_node_ids ?? []).filter(Boolean)));
+      const failed = Array.from(new Set((result.failed_node_ids ?? []).filter(Boolean)));
+      const executedSet = new Set(completed.concat(failed));
+      const pending = nodes.filter((n) => !executedSet.has(n.id)).map((n) => n.id);
+
+      const current = result.current_node_id ?? null;
+      const waitingApproval = Boolean(current && nodes.find((n) => n.id === current && n.data?.kind === 'approval'));
+
+      // supervisor metrics: per node, capture start/end from logs and outputs
+      const supervisorMetrics: Record<string, any> = {};
+      nodes.forEach((n) => {
+        const nodeLogs = structured.filter((l) => l.node && l.node.toLowerCase().includes((n.data.label ?? n.id).toLowerCase()));
+        const start = nodeLogs.length ? nodeLogs[0].timestamp ?? null : null;
+        const end = nodeLogs.length ? nodeLogs[nodeLogs.length - 1].timestamp ?? null : null;
+        const duration = start && end ? Math.max(0, new Date(end).getTime() - new Date(start).getTime()) : null;
+        const outputs = result.node_outputs?.find((o) => o.node_id === n.id)?.outputs ?? null;
+        const status = failed.includes(n.id) ? 'failed' : completed.includes(n.id) ? 'success' : current === n.id ? 'current' : 'pending';
+        supervisorMetrics[n.id] = { nodeId: n.id, label: n.data.label, start, end, duration, status, outputs, retries: 0 };
+      });
+
+      const timeline = nodes.map((n) => ({ nodeId: n.id, label: n.data.label, start: supervisorMetrics[n.id].start, end: supervisorMetrics[n.id].end, duration: supervisorMetrics[n.id].duration, status: supervisorMetrics[n.id].status }));
+
+      setExecutionContext((cur) => ({
+        ...cur,
+        currentNode: current,
+        paused: waitingApproval,
+        waitingApproval,
+        completedNodes: completed,
+        pendingNodes: pending,
+        failedNodes: failed,
+        timeline,
+        executionLogs: structured,
+        supervisorMetrics,
+        approvalState: waitingApproval ? { requestedAt: new Date().toISOString(), approver: null, reason: null } : cur.approvalState,
+      }));
+
       setExecutionAnimation(null);
       replayExecutionAnimation(result);
       setStatus('Workflow executed');
@@ -520,6 +594,93 @@ export function useWorkflow() {
       }
     };
   }, []);
+
+  // Approve / Reject handlers
+  const approveCurrent = async (approver?: string, reason?: string) => {
+    // mark approval in context and resume execution by calling backend
+    setExecutionContext((cur) => ({
+      ...cur,
+      paused: false,
+      waitingApproval: false,
+      approvalState: {
+        ...(cur.approvalState ?? {}),
+        approvedBy: approver ?? 'User',
+        approvalTime: new Date().toISOString(),
+        approvalReason: reason ?? null,
+      },
+      executionLogs: [
+        ...(cur.executionLogs ?? []),
+        { timestamp: new Date().toISOString(), node: 'Approval', type: 'INFO', status: 'APPROVED', message: `Approved by ${approver ?? 'User'}` },
+        { timestamp: new Date().toISOString(), node: 'Workflow', type: 'INFO', status: 'RESUMED', message: 'Workflow execution resumed' },
+      ],
+    }));
+
+    // resume via backend approve API if available
+    if (workflowId) {
+      try {
+        const res = await approveWorkflow(workflowId, { approver, reason });
+        // integrate returned result
+        setExecutionResult(res);
+        const structured = toStructuredLogs(res.execution_log);
+        setExecutionContext((cur) => ({ ...cur, executionLogs: structured }));
+        // refresh animation
+        replayExecutionAnimation(res);
+      } catch (err) {
+        console.error('Approve API failed', err);
+        // fallback: call execute to refresh
+        await executeWorkflowFromBackend();
+      }
+    } else {
+      await executeWorkflowFromBackend();
+    }
+  };
+
+  const rejectCurrent = async (rejectedBy?: string, reason?: string) => {
+    // mark rejected and stop locally first
+    setExecutionContext((cur) => ({
+      ...cur,
+      paused: false,
+      waitingApproval: false,
+      approvalState: {
+        ...(cur.approvalState ?? {}),
+        rejectedBy: rejectedBy ?? 'User',
+        rejectionTime: new Date().toISOString(),
+        rejectionReason: reason ?? null,
+      },
+      executionLogs: [
+        ...(cur.executionLogs ?? []),
+        { timestamp: new Date().toISOString(), node: 'Approval', type: 'ERROR', status: 'REJECTED', message: `Rejected by ${rejectedBy ?? 'User'}` },
+        { timestamp: new Date().toISOString(), node: 'Workflow', type: 'ERROR', status: 'TERMINATED', message: 'Workflow execution terminated by rejection' },
+      ],
+      failedNodes: [...cur.failedNodes, cur.currentNode ?? 'approval'],
+    }));
+
+    // notify backend if supported
+    if (workflowId) {
+      try {
+        const res = await rejectWorkflow(workflowId, { rejectedBy, reason });
+        setExecutionResult(res);
+        const structured = toStructuredLogs(res.execution_log);
+        setExecutionContext((cur) => ({ ...cur, executionLogs: structured }));
+      } catch (err) {
+        console.error('Reject API failed', err);
+        // no-op
+      }
+    } else {
+      // reflect result locally as failed
+      setExecutionResult((prev) => ({
+        ...(prev ?? {}),
+        execution_status: 'failed',
+        current_node_id: prev?.current_node_id ?? null,
+        failed_node_ids: Array.from(new Set([...(prev?.failed_node_ids ?? []), prev?.current_node_id ?? 'approval'])),
+        execution_log: (prev?.execution_log ?? []).concat([
+          `${new Date().toISOString()} - Approval: Rejected by ${rejectedBy ?? 'User'}`,
+          `${new Date().toISOString()} - Workflow: Execution terminated by rejection`,
+        ]),
+      } as WorkflowExecutionResult));
+    }
+  };
+
 
   const clearCanvas = () => {
     setNodes([]);
@@ -576,5 +737,9 @@ export function useWorkflow() {
     executionResult,
     isExecuting,
     errorMessage,
+    executionContext,
+    approveCurrent,
+    rejectCurrent,
+    resetExecutionState,
   };
 }

@@ -1,4 +1,7 @@
-from agents.llm_agent import LLMAgent
+import httpx
+import pytest
+
+from agents.llm_agent import GroqProvider, LLMAgent
 
 
 def test_llm_agent_uses_provider_and_stores_response(monkeypatch) -> None:
@@ -75,3 +78,29 @@ def test_llm_agent_records_errors_for_provider_failure(monkeypatch) -> None:
 
     assert result["execution_status"] == "failed"
     assert any("Invalid API key" in error for error in result["errors"])
+
+
+def test_groq_provider_preserves_http_error_body(monkeypatch, caplog) -> None:
+    class FakeResponse:
+        is_error = True
+        status_code = 400
+        text = '{"error":{"message":"response_format is not supported"}}'
+        request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("agents.llm_agent.httpx.Client", lambda **kwargs: FakeClient())
+
+    with pytest.raises(httpx.HTTPStatusError, match="response_format is not supported"):
+        GroqProvider().generate_text("extract", "resume text", "openai/gpt-oss-20b", 0.0, 256, "test-key")
+
+    assert "GROQ_RESPONSE_DEBUG" in caplog.text
+    assert "response_format is not supported" in caplog.text

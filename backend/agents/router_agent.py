@@ -33,6 +33,20 @@ class RouterAgent(BaseAgent):
         return None
 
     def _resolve_field_value(self, field: str, state: WorkflowState) -> Any:
+        workflow_data = state.get("workflow_data") or {}
+        current_node = state.get("current_node")
+        runtime_outputs = state.get("runtime_node_outputs") or {}
+        upstream_ids = [
+            edge.get("source")
+            for edge in workflow_data.get("edges") or []
+            if isinstance(edge, dict)
+            and edge.get("target") == current_node
+            and isinstance(edge.get("source"), str)
+        ]
+        for upstream_id in upstream_ids:
+            output = runtime_outputs.get(upstream_id) or {}
+            if field in output and output.get(field) is not None:
+                return output[field]
         return state.get(field)
 
     def _to_number(self, value: Any) -> float | None:
@@ -95,10 +109,11 @@ class RouterAgent(BaseAgent):
         default_route = str(config.get("defaultRoute") or "").strip()
 
         if not field:
-            state["errors"] = ["Router field is required."]
+            node_label = str(config.get("label") or "Route Email").strip()
+            state["errors"] = [f"{node_label} is not configured: routing field is required."]
             state["execution_status"] = "failed"
             state.setdefault("execution_log", []).append(
-                f"{datetime.now(timezone.utc).isoformat()} Router failed: missing field."
+                f"{datetime.now(timezone.utc).isoformat()} {node_label} failed: routing field is required."
             )
             return state
 

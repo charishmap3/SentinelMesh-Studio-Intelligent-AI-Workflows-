@@ -82,15 +82,26 @@ class EmailTriggerAgent(BaseAgent):
             "maxMessages": 5,
         }
 
-        try:
-            messages = self._fetch_emails(config)
-        except Exception as exc:  # pragma: no cover - defensive for mocked and runtime failures
-            state["errors"] = [str(exc)]
-            state["execution_status"] = "failed"
-            state.setdefault("execution_log", []).append(
-                f"{datetime.now(timezone.utc).isoformat()} Email trigger failed: {exc}"
-            )
-            return state
+        if node_config and node_config.get("demoMode"):
+            messages = [{
+                "message_id": "demo-order-1",
+                "sender": "customer@example.com",
+                "recipient": config.get("emailAccount") or "bakery@example.com",
+                "subject": node_config.get("demoSubject") or "Order for 2 chocolate cakes and 12 croissants",
+                "body": node_config.get("demoBody") or "Hi, I would like to order 2 chocolate cakes and 12 croissants for tomorrow morning.",
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "unread": True,
+            }]
+        else:
+            try:
+                messages = self._fetch_emails(config)
+            except Exception as exc:  # pragma: no cover - defensive for mocked and runtime failures
+                state["errors"] = [str(exc)]
+                state["execution_status"] = "failed"
+                state.setdefault("execution_log", []).append(
+                    f"{datetime.now(timezone.utc).isoformat()} Email trigger failed: {exc}"
+                )
+                return state
 
         filtered_messages: list[dict[str, Any]] = []
 

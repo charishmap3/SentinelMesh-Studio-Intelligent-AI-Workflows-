@@ -23,35 +23,45 @@ class RAGIncidentMemoryAgent(BaseAgent):
             workflow_health=workflow_health,
         )
 
-        if incident_matches:
+        # Only populate incident matches/recommended resolution when not already provided
+        existing_incidents = state.get("incident_matches")
+        existing_recommendation = state.get("recommended_resolution")
+
+        if incident_matches and not existing_incidents:
             recommended_resolution = incident_matches[0].get("resolution") or "No known resolution found."
             knowledge_base_match_count = len(incident_matches)
             rag_summary = (
                 f"Retrieved {knowledge_base_match_count} similar incidents for {failure_category or 'unknown failure'}."
             )
+            state["incident_matches"] = [
+                {
+                    "incident_id": incident.get("incident_id"),
+                    "failure_category": incident.get("failure_category"),
+                    "severity": incident.get("severity"),
+                    "recoverable": incident.get("recoverable"),
+                    "root_cause": incident.get("root_cause"),
+                    "resolution": incident.get("resolution"),
+                    "recommended_action": incident.get("recommended_action"),
+                }
+                for incident in incident_matches
+            ]
+            state["recommended_resolution"] = recommended_resolution
+            state["knowledge_base_match_count"] = knowledge_base_match_count
+            state["rag_summary"] = rag_summary
         else:
-            recommended_resolution = "No known incident match found."
-            knowledge_base_match_count = 0
-            rag_summary = "No incident matches found in the knowledge base."
+            # No matches or already provided by FailureDetection - preserve existing values
+            if not incident_matches:
+                rag_summary = "No incident matches found in the knowledge base."
+                state.setdefault("incident_matches", [])
+                state.setdefault("recommended_resolution", "No known incident match found.")
+                state.setdefault("knowledge_base_match_count", 0)
+                state.setdefault("rag_summary", rag_summary)
+            else:
+                # incident_matches exist but were already populated -> keep them
+                rag_summary = state.get("rag_summary", "Retrieved existing incident matches.")
 
         execution_log = list(state.get("execution_log") or [])
         execution_log.append(rag_summary)
-
-        state["incident_matches"] = [
-            {
-                "incident_id": incident.get("incident_id"),
-                "failure_category": incident.get("failure_category"),
-                "severity": incident.get("severity"),
-                "recoverable": incident.get("recoverable"),
-                "root_cause": incident.get("root_cause"),
-                "resolution": incident.get("resolution"),
-                "recommended_action": incident.get("recommended_action"),
-            }
-            for incident in incident_matches
-        ]
-        state["recommended_resolution"] = recommended_resolution
-        state["knowledge_base_match_count"] = knowledge_base_match_count
-        state["rag_summary"] = rag_summary
         state["execution_log"] = execution_log
 
         return state

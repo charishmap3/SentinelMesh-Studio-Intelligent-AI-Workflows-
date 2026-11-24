@@ -13,6 +13,13 @@ class InventoryAgent(BaseAgent):
     def execute(self, state: WorkflowState) -> WorkflowState:
         workflow_data = state.get("workflow_data") or {}
         requested_items = workflow_data.get("requested_items") or []
+        config = next((node.get("data", {}) for node in workflow_data.get("nodes", []) if node.get("id") == state.get("current_node")), {})
+        upstream_outputs = state.get("runtime_node_outputs") or {}
+        if not requested_items:
+            for output in upstream_outputs.values():
+                if isinstance(output, dict) and isinstance(output.get("items"), list):
+                    requested_items = [{"item": item.get("product"), "quantity": item.get("quantity", 0)} for item in output["items"] if isinstance(item, dict)]
+                    break
 
         if not isinstance(requested_items, list) or not requested_items:
             state["execution_status"] = "failed"
@@ -21,7 +28,9 @@ class InventoryAgent(BaseAgent):
             state["inventory_checked"] = True
             return state
 
-        mock_inventory: dict[str, int] = {
+        mock_inventory: dict[str, int] = config.get("demoInventory") or {
+            "chocolate cake": 10,
+            "croissant": 50,
             "Laptop": 25,
             "Keyboard": 100,
             "Mouse": 150,
@@ -48,7 +57,7 @@ class InventoryAgent(BaseAgent):
                 errors.append(f"Invalid quantity for {item_name}.")
                 continue
 
-            available_quantity = mock_inventory.get(item_name, 0)
+            available_quantity = mock_inventory.get(item_name, mock_inventory.get(str(item_name).lower(), 0))
             availability_status = "available" if available_quantity >= quantity else "insufficient"
             results.append(
                 {
@@ -60,6 +69,7 @@ class InventoryAgent(BaseAgent):
             )
 
         state["inventory_result"] = results
+        state["inventory_output"] = {"available": all(item["availability_status"] == "available" for item in results), "items": results, "missing_items": [item["item"] for item in results if item["availability_status"] != "available"]}
         state["inventory_checked"] = True
 
         if errors:

@@ -5,6 +5,7 @@ from typing import Any
 
 from agents.base_agent import BaseAgent
 from agents.llm_agent import GeminiProvider, GroqProvider, OpenAIProvider
+from agents.input_resolution import resolve_node_input
 from graph.state import WorkflowState
 
 
@@ -43,30 +44,7 @@ class ClassifierAgent(BaseAgent):
         return []
 
     def _resolve_input_text(self, state: WorkflowState, input_field: str) -> str:
-        field = (input_field or "").strip()
-        if field in {"email_subject", "email_subject_and_body", "email_body", "input", "input_text"}:
-            if field == "email_subject":
-                return str(state.get("email_subject") or "")
-            if field == "email_body":
-                return str(state.get("email_body") or "")
-            if field == "email_subject_and_body":
-                subject = str(state.get("email_subject") or "").strip()
-                body = str(state.get("email_body") or "").strip()
-                parts = [part for part in [subject, body] if part]
-                if parts:
-                    return "\n\n".join(parts)
-                return str(state.get("input_text") or "")
-            if field == "input":
-                return str(state.get("input_text") or "")
-            return str(state.get("input_text") or "")
-
-        if state.get("input_text"):
-            return str(state["input_text"])
-        if state.get("email_subject"):
-            return str(state["email_subject"])
-        if state.get("email_body"):
-            return str(state["email_body"])
-        return ""
+        return resolve_node_input(state, input_field)
 
     def _build_prompt(self, categories: list[str], instructions: str) -> str:
         category_list = ", ".join(categories)
@@ -143,6 +121,7 @@ class ClassifierAgent(BaseAgent):
             return state
 
         state["classification"] = normalized_response
+        state["category"] = normalized_response
         state["classifier_input_field"] = input_field
         state["classifier_categories"] = categories
         state["classifier_provider"] = provider_name

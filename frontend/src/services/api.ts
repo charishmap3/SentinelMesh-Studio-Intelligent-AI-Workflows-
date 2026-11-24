@@ -11,6 +11,23 @@ const api = axios.create({
   timeout: 10000,
 });
 
+function workflowRuntimeMetadata(payload: WorkflowPayload) {
+  const fileNode = payload.nodes.find((node) => node.data.kind === 'file-upload');
+  const extractor = payload.nodes.find((node) => node.data.kind === 'extractor');
+  const summarizer = payload.nodes.find((node) => node.data.kind === 'summarizer');
+  return {
+    apiBaseUrl: api.defaults.baseURL,
+    nodeCount: payload.nodes.length,
+    nodeIds: payload.nodes.map((node) => node.id),
+    fileUploadNodeId: fileNode?.id ?? null,
+    hasFileContentBase64: Boolean(fileNode?.data.fileContentBase64),
+    fileContentBase64Length: fileNode?.data.fileContentBase64?.length ?? 0,
+    fileName: fileNode?.data.fileName ?? null,
+    extractorInputField: extractor?.data.inputField ?? null,
+    summarizerInputField: summarizer?.data.inputField ?? null,
+  };
+}
+
 function getErrorMessage(error: unknown) {
   if (axios.isAxiosError(error)) {
     return error.response?.data?.detail || error.message;
@@ -25,7 +42,37 @@ function getErrorMessage(error: unknown) {
 
 export async function saveWorkflow(payload: WorkflowPayload): Promise<WorkflowRecord> {
   try {
+    console.info('WORKFLOW_PERSIST_DEBUG POST', {
+      url: `${api.defaults.baseURL}/workflows`,
+      method: 'POST',
+      ...workflowRuntimeMetadata(payload),
+    });
     const response = await api.post<WorkflowRecord>('/workflows', payload);
+    console.info('WORKFLOW_PERSIST_DEBUG POST_RESPONSE', {
+      status: response.status,
+      workflowId: response.data.workflow_id,
+      ...workflowRuntimeMetadata(response.data),
+    });
+    return response.data;
+  } catch (error) {
+    throw new Error(getErrorMessage(error));
+  }
+}
+
+export async function updateWorkflow(workflowId: string, payload: WorkflowPayload): Promise<WorkflowRecord> {
+  try {
+    console.info('WORKFLOW_PERSIST_DEBUG PUT', {
+      workflowId,
+      url: `${api.defaults.baseURL}/workflows/${workflowId}`,
+      method: 'PUT',
+      ...workflowRuntimeMetadata(payload),
+    });
+    const response = await api.put<WorkflowRecord>(`/workflows/${workflowId}`, payload);
+    console.info('WORKFLOW_PERSIST_DEBUG PUT_RESPONSE', {
+      status: response.status,
+      workflowId: response.data.workflow_id,
+      ...workflowRuntimeMetadata(response.data),
+    });
     return response.data;
   } catch (error) {
     throw new Error(getErrorMessage(error));
@@ -60,7 +107,40 @@ export async function deleteWorkflow(workflowId: string): Promise<void> {
 
 export async function executeWorkflow(workflowId: string): Promise<WorkflowExecutionResult> {
   try {
+    console.info('WORKFLOW_EXECUTE_DEBUG REQUEST', {
+      workflowId,
+      url: `${api.defaults.baseURL}/workflows/${workflowId}/execute`,
+      method: 'POST',
+    });
     const response = await api.post<WorkflowExecutionResult>(`/workflows/${workflowId}/execute`, undefined, {
+      timeout: 30000,
+    });
+    console.info('WORKFLOW_EXECUTE_DEBUG RESPONSE', {
+      status: response.status,
+      workflowId: response.data.workflow_id,
+      executionId: response.data.execution_id,
+      executionStatus: response.data.execution_status,
+    });
+    return response.data;
+  } catch (error) {
+    throw new Error(getErrorMessage(error));
+  }
+}
+
+export async function approveWorkflow(workflowId: string, payload: { approver?: string; reason?: string }): Promise<WorkflowExecutionResult> {
+  try {
+    const response = await api.post<WorkflowExecutionResult>(`/workflows/${workflowId}/approve`, payload, {
+      timeout: 30000,
+    });
+    return response.data;
+  } catch (error) {
+    throw new Error(getErrorMessage(error));
+  }
+}
+
+export async function rejectWorkflow(workflowId: string, payload: { rejectedBy?: string; reason?: string }): Promise<WorkflowExecutionResult> {
+  try {
+    const response = await api.post<WorkflowExecutionResult>(`/workflows/${workflowId}/reject`, payload, {
       timeout: 30000,
     });
     return response.data;

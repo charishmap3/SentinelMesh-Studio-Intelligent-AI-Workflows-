@@ -18,6 +18,8 @@ import {
   Split,
   Table2,
   Trash2,
+  Upload,
+  UserCheck,
   WifiOff,
 } from 'lucide-react';
 import { connectGmail, disconnectGmail, getGmailConnectionStatus } from '../services/api';
@@ -210,6 +212,7 @@ function getNodeIcon(kind: string) {
     'http-api': Code2,
     database: Database,
     'rag-incident-memory': PlugZap,
+    'file-upload': Upload,
   };
 
   return icons[kind] ?? Settings2;
@@ -369,6 +372,79 @@ function PropertiesPanel({ selectedNode, onUpdateNode }: PropertiesPanelProps) {
         </Section>
       ) : null}
 
+      {normalizedKind === 'scheduler' ? (
+        <Section title="Scheduler" subtitle="Define when this workflow trigger becomes due." icon={CalendarClock}>
+          <SelectInput
+            label="Schedule Type"
+            value={selectedNode.data.scheduleType ?? 'interval'}
+            options={[
+              { value: 'interval', label: 'Interval' },
+              { value: 'once', label: 'Run once' },
+              { value: 'cron', label: 'Cron expression' },
+            ]}
+            onChange={(value) => onUpdateNode(selectedNode.id, 'scheduleType', value)}
+          />
+          {(selectedNode.data.scheduleType ?? 'interval') === 'interval' ? (
+            <TextInput
+              label="Interval (minutes)"
+              type="number"
+              value={selectedNode.data.intervalMinutes ?? 1}
+              onChange={(value) => onUpdateNode(selectedNode.id, 'intervalMinutes', Number(value))}
+            />
+          ) : null}
+          {(selectedNode.data.scheduleType ?? 'interval') === 'cron' ? (
+            <TextInput
+              label="Cron Expression"
+              value={selectedNode.data.cronExpression ?? ''}
+              onChange={(value) => onUpdateNode(selectedNode.id, 'cronExpression', value)}
+            />
+          ) : null}
+        </Section>
+      ) : null}
+
+      {normalizedKind === 'file-upload' ? (
+        <Section title="File Upload" subtitle="Select a file to persist its content and metadata with this workflow." icon={Upload}>
+          <label className={smallButtonClass}>
+            <Upload className="h-4 w-4" />
+            {selectedNode.data.fileName ? 'Replace file' : 'Select file'}
+            <input
+              type="file"
+              className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const dataUrl = String(reader.result ?? '');
+                  const separator = dataUrl.indexOf(',');
+                  const fileContentBase64 = separator >= 0 ? dataUrl.slice(separator + 1) : dataUrl;
+                  const fileReference = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                    ? crypto.randomUUID()
+                    : `file-${Date.now()}`;
+                  onUpdateNode(selectedNode.id, 'fileReference', fileReference);
+                  onUpdateNode(selectedNode.id, 'fileName', file.name);
+                  onUpdateNode(selectedNode.id, 'fileMimeType', file.type || 'application/octet-stream');
+                  onUpdateNode(selectedNode.id, 'fileSize', file.size);
+                  onUpdateNode(selectedNode.id, 'fileLastModified', file.lastModified);
+                  onUpdateNode(selectedNode.id, 'fileContentBase64', fileContentBase64);
+                };
+                reader.readAsDataURL(file);
+                event.target.value = '';
+              }}
+            />
+          </label>
+          {selectedNode.data.fileName ? (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-200">
+              <p className="font-semibold">{selectedNode.data.fileName}</p>
+              <p className="mt-1 text-xs">{selectedNode.data.fileMimeType || 'Unknown type'} · {selectedNode.data.fileSize ?? 0} bytes</p>
+              <p className="mt-1 break-all text-xs">Reference: {selectedNode.data.fileReference || 'Pending'}</p>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500 dark:text-slate-400">A file is required before execution.</p>
+          )}
+        </Section>
+      ) : null}
+
       {['llm', 'classifier', 'extractor', 'summarizer'].includes(normalizedKind) ? (
         <Section title="AI Runtime" subtitle="Provider, model, input, and generation settings." icon={Sparkles}>
           <SelectInput label="Provider" value={selectedNode.data.provider || (normalizedKind === 'llm' ? 'OpenAI' : 'Groq')} options={providerOptions} onChange={(value) => onUpdateNode(selectedNode.id, 'provider', value)} />
@@ -379,6 +455,7 @@ function PropertiesPanel({ selectedNode, onUpdateNode }: PropertiesPanelProps) {
           ) : (
             <>
               <SelectInput label="Input Field" value={selectedNode.data.inputField || 'email_subject_and_body'} options={inputFieldOptions} onChange={(value) => onUpdateNode(selectedNode.id, 'inputField', value)} />
+              <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">Current Input uses the input or output supplied by the connected upstream node.</p>
               {normalizedKind === 'classifier' ? (
                 <StringListEditor
                   title="Categories"
@@ -420,6 +497,17 @@ function PropertiesPanel({ selectedNode, onUpdateNode }: PropertiesPanelProps) {
           <TextInput label="Subject" value={selectedNode.data.subject ?? ''} onChange={(value) => onUpdateNode(selectedNode.id, 'subject', value)} />
           <TextArea label="Optional Body" value={selectedNode.data.body ?? ''} onChange={(value) => onUpdateNode(selectedNode.id, 'body', value)} />
           <SwitchField label="Use LLM Output" checked={Boolean(selectedNode.data.useLlmOutput)} onChange={(value) => onUpdateNode(selectedNode.id, 'useLlmOutput', value)} />
+        </Section>
+      ) : null}
+
+      {normalizedKind === 'approval' ? (
+        <Section title="Human Approval" subtitle="Choose who receives the approval request. This workflow value overrides the server default." icon={UserCheck}>
+          <TextInput
+            label="Approver Email"
+            value={selectedNode.data.approverEmail ?? ''}
+            onChange={(value) => onUpdateNode(selectedNode.id, 'approverEmail', value)}
+          />
+          <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">Required before an approval email can be sent.</p>
         </Section>
       ) : null}
 

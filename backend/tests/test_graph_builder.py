@@ -83,6 +83,36 @@ def test_graph_compilation_is_supported() -> None:
     assert hasattr(compiled_graph, "invoke")
 
 
+def test_graph_state_preserves_supervisor_fields() -> None:
+    builder = GraphBuilder()
+    workflow = {
+        "nodes": [{"id": "only", "type": "step"}],
+        "edges": [],
+    }
+
+    graph = builder.build_graph(workflow)
+    initial_state = {
+        "workflow_id": "wf-123",
+        "current_node": None,
+        "execution_status": "pending",
+        "execution_log": [],
+        "workflow_data": workflow,
+        "supervisor_timeline": [{"timestamp": "2026-01-01T00:00:00Z", "node_id": "only", "event": "started"}],
+        "supervisor_metrics": {"total_execution_time_ms": 0},
+        "supervisor_node_details": [{"node_id": "only", "status": "pending"}],
+        "supervisor_summary": "Pending supervisor data.",
+        "node_metrics": {"only": {"node_id": "only", "status": "running"}},
+    }
+
+    result = graph.invoke(initial_state)
+
+    assert result["supervisor_timeline"] == initial_state["supervisor_timeline"]
+    assert result["supervisor_metrics"] == initial_state["supervisor_metrics"]
+    assert result["supervisor_node_details"] == initial_state["supervisor_node_details"]
+    assert result["supervisor_summary"] == initial_state["supervisor_summary"]
+    assert result["node_metrics"] == initial_state["node_metrics"]
+
+
 def test_node_exception_is_captured_as_standardized_failure(monkeypatch) -> None:
     class FailingAgent:
         def execute(self, state):

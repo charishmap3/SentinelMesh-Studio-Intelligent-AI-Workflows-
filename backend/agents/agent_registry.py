@@ -12,10 +12,12 @@ from agents.llm_agent import LLMAgent
 from agents.router_agent import RouterAgent
 from agents.send_email_agent import SendEmailAgent
 from agents.failure_detection import FailureDetectionAgent
+from agents.file_upload import FileUploadAgent
 from agents.inventory import InventoryAgent
 from agents.purchase_order import PurchaseOrderAgent
 from agents.rag_incident_memory import RAGIncidentMemoryAgent
 from agents.requirement_validation import RequirementValidationAgent
+from agents.scheduler_agent import SchedulerAgent
 from agents.summarizer_agent import SummarizerAgent
 from agents.supervisor import SupervisorAgent
 from agents.vendor_selection import VendorSelectionAgent
@@ -43,6 +45,8 @@ class AgentRegistry:
             node_types.FAILURE_DETECTION: FailureDetectionAgent(),
             node_types.RAG_INCIDENT_MEMORY: RAGIncidentMemoryAgent(),
             node_types.AUTO_HEALING: AutoHealingAgent(),
+            node_types.SCHEDULER: SchedulerAgent(),
+            node_types.FILE_UPLOAD: FileUploadAgent(),
         }
 
     def get_agent(self, node_type: str | None) -> BaseAgent | None:

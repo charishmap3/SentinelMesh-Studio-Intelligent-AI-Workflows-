@@ -129,6 +129,40 @@ def test_router_agent_matches_general_route() -> None:
     assert result["execution_status"] == "completed"
 
 
+def test_router_agent_resolves_classifier_category_from_upstream_runtime_output() -> None:
+    agent = RouterAgent()
+    workflow = {
+        "nodes": [
+            {"id": "email-classifier", "data": {"kind": "classifier"}},
+            build_router_node([
+                {"route": "request", "operator": "equals", "value": "request"},
+                {"route": "complaint", "operator": "equals", "value": "complaint"},
+            ], field="category"),
+        ],
+        "edges": [{"source": "email-classifier", "target": "router1"}],
+    }
+    state = make_state("router1", workflow, {
+        "runtime_node_outputs": {"email-classifier": {"category": "request"}},
+    })
+
+    result = agent.execute(state)
+
+    assert result["router_result"] == "request"
+    assert result["execution_status"] == "completed"
+
+
+def test_router_agent_reports_named_configuration_error_when_field_is_missing() -> None:
+    agent = RouterAgent()
+    workflow = {"nodes": [build_router_node([], field="")], "edges": []}
+    workflow["nodes"][0]["data"]["label"] = "Route Email"
+    state = make_state("router1", workflow)
+
+    result = agent.execute(state)
+
+    assert result["execution_status"] == "failed"
+    assert result["errors"] == ["Route Email is not configured: routing field is required."]
+
+
 def test_router_graph_builder_executes_selected_branch_and_skips_others(monkeypatch) -> None:
     class DummyAgent:
         def __init__(self) -> None:
@@ -270,3 +304,37 @@ def test_supervisor_marks_only_selected_router_branch_as_completed() -> None:
     assert "Normal Handler" in result["completed_stages"]
     assert "Critical Handler" in result["skipped_stages"]
     assert "Default Handler" in result["skipped_stages"]
+
+
+def test_supervisor_does_not_report_failed_router_as_completed() -> None:
+    workflow = {
+        "workflow_id": "wf-router-failure-monitor",
+        "nodes": [
+            {"id": "email-1", "data": {"kind": "email-trigger", "label": "Email Trigger"}},
+            {"id": "router1", "data": {"kind": "router", "label": "Route Email"}},
+            {"id": "reply", "data": {"kind": "send-email", "label": "Auto Reply"}},
+        ],
+        "edges": [
+            {"source": "email-1", "target": "router1"},
+            {"source": "router1", "target": "reply"},
+        ],
+    }
+    state = make_state("router1", workflow, {
+        "execution_status": "failed",
+        "errors": ["Route Email is not configured: routing field is required."],
+        "executed_nodes": ["email-1", "router1"],
+        "failed_node_ids": ["router1"],
+        "skipped_nodes": ["reply"],
+        "execution_log": [
+            "2026-09-20T00:00:00+00:00 - email-1 completed (1ms)",
+            "2026-09-20T00:00:01+00:00 - router1 failed (1ms)",
+            "2026-09-20T00:00:01+00:00 - reply skipped: Upstream node(s) failed: router1.",
+        ],
+    })
+
+    result = SupervisorAgent().execute(state)
+
+    assert result["completed_stages"] == ["Email Trigger"]
+    assert result["failed_stages"] == ["Route Email"]
+    assert result["skipped_stages"] == ["Auto Reply"]
+    assert result["workflow_health"] == "Failed"

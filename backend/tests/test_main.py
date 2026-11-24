@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -113,6 +114,47 @@ def test_execute_workflow_endpoint() -> None:
     assert isinstance(body["healing_strategy"], str)
     assert isinstance(body["healing_status"], str)
     assert isinstance(body["execution_log"], list)
+
+
+def test_approve_workflow_refreshes_state_after_resume() -> None:
+    with patch("services.email_service.send_email", return_value=(True, None)):
+        create_response = client.post(
+            "/workflows",
+            json={
+                "name": "Approval Sync Workflow",
+                "description": "Test approval resume state synchronization",
+                "nodes": [
+                    {"id": "approval", "type": "Approval", "data": {"label": "Approval"}},
+                    {"id": "supervisor", "type": "Supervisor", "data": {"label": "Supervisor"}},
+                ],
+                "edges": [{"source": "approval", "target": "supervisor"}],
+            },
+        )
+        workflow_id = create_response.json()["workflow_id"]
+
+        execute_response = client.post(f"/workflows/{workflow_id}/execute")
+        assert execute_response.status_code == 200
+        execute_body = execute_response.json()
+        assert execute_body["execution_status"] == "waiting_approval"
+        assert "approval" in execute_body["executed_node_ids"]
+        assert execute_body["workflow_health"] == "Waiting for Approval"
+
+        approve_response = client.post(
+            f"/workflows/{workflow_id}/approve",
+            json={"approver": "tester", "reason": "Approved for resume"},
+        )
+        assert approve_response.status_code == 200
+        approve_body = approve_response.json()
+        assert approve_body["execution_status"] == "completed"
+        assert approve_body["current_node_id"] is None
+        assert approve_body["workflow_health"] == "Healthy"
+        assert approve_body["failed_stages"] == []
+        assert approve_body["skipped_stages"] == []
+        assert approve_body["supervisor_metrics"]["pending_nodes"] == 0
+        assert approve_body["supervisor_metrics"]["current_running_node"] is None
+        assert approve_body["workflow_summary"].startswith("Workflow health: Healthy")
+        assert "Approval" in approve_body["workflow_summary"]
+        assert "Supervisor" in approve_body["workflow_summary"]
 
 
 def test_invalid_workflow_id() -> None:

@@ -51,7 +51,7 @@ def test_warning_workflow_is_marked_warning() -> None:
 
     result = agent.execute(state)
 
-    assert result["workflow_health"] == "Warning"
+    assert result["workflow_health"] == "Waiting for Approval"
     assert node_types.PURCHASE_ORDER in result["skipped_stages"]
     assert result["failed_stages"] == []
 

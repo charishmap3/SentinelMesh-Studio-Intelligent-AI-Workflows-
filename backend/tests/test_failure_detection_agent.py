@@ -152,11 +152,9 @@ def test_approval_failure_is_classified() -> None:
 
     result = agent.execute(state)
 
-    assert result["failure_detected"] is True
-    assert result["failure_category"] == "Approval Failure"
-    assert result["failure_severity"] == "Medium"
-    assert result["recoverable"] is True
-    assert result["failure_details"]["recommended_next_step"] == "Request Manual Approval"
+    assert result["failure_detected"] is False
+    assert result["failure_category"] == "None"
+    assert result["workflow_health"] == "Waiting for Approval"
 
 
 def test_purchase_order_failure_is_classified() -> None:

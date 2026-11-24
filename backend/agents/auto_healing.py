@@ -16,46 +16,61 @@ class AutoHealingAgent(BaseAgent):
 
         execution_log = list(state.get("execution_log") or [])
 
-        if not failure_detected or failure_category in {None, "None"}:
-            healing_strategy = "No Recovery Needed"
-            healing_status = "Not Required"
-            healing_attempted = False
-            next_recommended_action = "No Recovery Needed"
-        elif not recoverable:
-            healing_strategy = "Escalate Workflow"
-            healing_status = "Not Recommended"
-            healing_attempted = False
-            next_recommended_action = "Escalate Workflow"
-        elif failure_category == "Inventory Failure":
-            healing_strategy = "Retry Inventory Lookup"
-            healing_status = "Recommended"
-            healing_attempted = True
-            next_recommended_action = "Retry Inventory Lookup"
-        elif failure_category == "Vendor Selection Failure":
-            healing_strategy = "Select Alternate Vendor"
-            healing_status = "Recommended"
-            healing_attempted = True
-            next_recommended_action = "Select Alternate Vendor"
-        elif failure_category == "Budget Failure":
-            healing_strategy = "Increase Budget Request"
-            healing_status = "Recommended"
-            healing_attempted = True
-            next_recommended_action = "Increase Budget Request"
-        elif failure_category == "Approval Failure":
-            healing_strategy = "Request Manual Approval"
-            healing_status = "Recommended"
-            healing_attempted = True
-            next_recommended_action = "Request Manual Approval"
-        elif failure_category == "Purchase Order Failure":
-            healing_strategy = "Regenerate Purchase Order"
-            healing_status = "Recommended"
-            healing_attempted = True
-            next_recommended_action = "Regenerate Purchase Order"
+        # Preserve healing strategy/status if already provided (e.g., by FailureDetectionAgent)
+        existing_strategy = state.get("healing_strategy")
+        existing_status = state.get("healing_status")
+        preserve_healing = False
+        if existing_strategy and str(existing_strategy).strip() and existing_strategy != "No Recovery Needed":
+            preserve_healing = True
+        if existing_status and str(existing_status).strip() and existing_status != "Not Required":
+            preserve_healing = True
+
+        if preserve_healing:
+            healing_strategy = existing_strategy or "No Recovery Needed"
+            healing_status = existing_status or "Not Required"
+            healing_attempted = bool(state.get("healing_attempted", False))
+            next_recommended_action = state.get("next_recommended_action", healing_strategy)
         else:
-            healing_strategy = recommended_next_step if recommended_next_step else "Escalate Workflow"
-            healing_status = "Recommended" if recoverable else "Not Recommended"
-            healing_attempted = recoverable
-            next_recommended_action = healing_strategy
+            if not failure_detected or failure_category in {None, "None"}:
+                healing_strategy = "No Recovery Needed"
+                healing_status = "Not Required"
+                healing_attempted = False
+                next_recommended_action = "No Recovery Needed"
+            elif not recoverable:
+                healing_strategy = "Escalate Workflow"
+                healing_status = "Not Recommended"
+                healing_attempted = False
+                next_recommended_action = "Escalate Workflow"
+            elif failure_category == "Inventory Failure":
+                healing_strategy = "Retry Inventory Lookup"
+                healing_status = "Recommended"
+                healing_attempted = True
+                next_recommended_action = "Retry Inventory Lookup"
+            elif failure_category == "Vendor Selection Failure":
+                healing_strategy = "Select Alternate Vendor"
+                healing_status = "Recommended"
+                healing_attempted = True
+                next_recommended_action = "Select Alternate Vendor"
+            elif failure_category == "Budget Failure":
+                healing_strategy = "Increase Budget Request"
+                healing_status = "Recommended"
+                healing_attempted = True
+                next_recommended_action = "Increase Budget Request"
+            elif failure_category == "Approval Failure":
+                healing_strategy = "Request Manual Approval"
+                healing_status = "Recommended"
+                healing_attempted = True
+                next_recommended_action = "Request Manual Approval"
+            elif failure_category == "Purchase Order Failure":
+                healing_strategy = "Regenerate Purchase Order"
+                healing_status = "Recommended"
+                healing_attempted = True
+                next_recommended_action = "Regenerate Purchase Order"
+            else:
+                healing_strategy = recommended_next_step if recommended_next_step else "Escalate Workflow"
+                healing_status = "Recommended" if recoverable else "Not Recommended"
+                healing_attempted = recoverable
+                next_recommended_action = healing_strategy
 
         healing_summary = (
             f"Auto-healing strategy: {healing_strategy} ({healing_status})"

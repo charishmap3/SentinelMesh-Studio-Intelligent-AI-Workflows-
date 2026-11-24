@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,8 @@ import httpx
 
 from agents.base_agent import BaseAgent
 from graph.state import WorkflowState
+
+logger = logging.getLogger(__name__)
 
 
 class BaseLLMProvider:
@@ -52,24 +55,86 @@ class GeminiProvider(BaseLLMProvider):
 
 
 class GroqProvider(BaseLLMProvider):
+    def __init__(self) -> None:
+        self.request_json = False
+
     def generate_text(self, prompt: str, input_text: str, model: str, temperature: float, max_tokens: int, api_key: str | None = None) -> str:
         api_key = api_key or os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("Missing Groq API key")
         with httpx.Client(timeout=10.0) as client:
+            request_payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": f"{prompt}\n\n{input_text}"}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if self.request_json:
+                request_payload["response_format"] = {"type": "json_object"}
+            if model.startswith("openai/gpt-oss-"):
+                request_payload.pop("max_tokens", None)
+                request_payload["max_completion_tokens"] = max(max_tokens, 512)
+                request_payload["reasoning_effort"] = "low"
+
+            logger.warning(
+                "GROQ_REQUEST_DEBUG model=%s message_count=%s system_message_type=%s user_message_type=%s user_content_length=%s response_format=%s has_tools=%s temperature=%s max_completion_tokens=%s reasoning_effort=%s",
+                model,
+                len(request_payload["messages"]),
+                type(next((message for message in request_payload["messages"] if message.get("role") == "system"), {}).get("content")).__name__,
+                type(next((message for message in request_payload["messages"] if message.get("role") == "user"), {}).get("content")).__name__,
+                len(request_payload["messages"][0].get("content", "")),
+                request_payload.get("response_format"),
+                bool(request_payload.get("tools")),
+                temperature,
+                request_payload.get("max_completion_tokens", request_payload.get("max_tokens")),
+                request_payload.get("reasoning_effort"),
+            )
+
             response = client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": f"{prompt}\n\n{input_text}"}],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
+                json=request_payload,
             )
-            response.raise_for_status()
+            if response.is_error:
+                response_body = response.text[:4000]
+                logger.error(
+                    "GROQ_RESPONSE_DEBUG status=%s body=%s",
+                    response.status_code,
+                    response_body,
+                )
+                raise httpx.HTTPStatusError(
+                    f"Groq request failed with HTTP {response.status_code}: {response_body}",
+                    request=response.request,
+                    response=response,
+                )
             payload = response.json()
-            return payload["choices"][0]["message"]["content"]
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            choice = choices[0] if isinstance(choices, list) and choices else {}
+            message = choice.get("message") if isinstance(choice, dict) else {}
+            content = message.get("content") if isinstance(message, dict) else None
+            tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+            finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+            logger.warning(
+                "EXTRACTOR_LLM_DEBUG model=%s choices_count=%s response_type=%s message_present=%s content_present=%s content_length=%s finish_reason=%s tool_calls_present=%s",
+                model,
+                len(choices) if isinstance(choices, list) else 0,
+                type(payload).__name__,
+                bool(message),
+                bool(content),
+                len(content) if isinstance(content, str) else 0,
+                finish_reason,
+                bool(tool_calls),
+            )
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(tool_calls, list) and tool_calls:
+                function_data = tool_calls[0].get("function") if isinstance(tool_calls[0], dict) else None
+                arguments = function_data.get("arguments") if isinstance(function_data, dict) else None
+                if isinstance(arguments, str) and arguments.strip():
+                    return arguments
+            raise ValueError(
+                f"Groq returned an empty response from the LLM (choices={len(choices) if isinstance(choices, list) else 0}, finish_reason={finish_reason})."
+            )
 
 
 class LLMAgent(BaseAgent):

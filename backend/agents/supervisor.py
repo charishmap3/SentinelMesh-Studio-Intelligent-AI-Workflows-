@@ -75,6 +75,13 @@ class SupervisorAgent(BaseAgent):
         return None
 
     def execute(self, state: WorkflowState) -> WorkflowState:
+        # Debug: indicate supervisor execution entry
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            logger.debug("[SupervisorAgent] executed: current_node=%s, execution_status=%s", state.get('current_node'), state.get('execution_status'))
+        except Exception:
+            logger.debug("[SupervisorAgent] executed (failed to read state)")
         execution_log = list(state.get("execution_log") or [])
         errors = list(state.get("errors") or [])
         execution_status = state.get("execution_status")
@@ -131,6 +138,7 @@ class SupervisorAgent(BaseAgent):
         completed_stages: list[str] = []
         failed_stages: list[str] = []
         skipped_stages: list[str] = []
+        waiting_stages: list[str] = []
 
         generic_nodes: list[dict[str, Any]] = []
         for node in self._workflow_nodes(state):
@@ -140,6 +148,18 @@ class SupervisorAgent(BaseAgent):
 
         executed_nodes = list(state.get("executed_nodes") or [])
         skipped_nodes = list(state.get("skipped_nodes") or [])
+        failed_node_ids_state = {
+            node_id for node_id in (state.get("failed_node_ids") or []) if isinstance(node_id, str)
+        }
+        terminal_node_status: dict[str, str] = {}
+        for entry in execution_log:
+            if not isinstance(entry, str):
+                continue
+            for node_id in [node.get("id") for node in self._workflow_nodes(state) if isinstance(node.get("id"), str)]:
+                if f"- {node_id} completed (" in entry:
+                    terminal_node_status[node_id] = "completed"
+                elif f"- {node_id} failed (" in entry:
+                    terminal_node_status[node_id] = "failed"
         current_node_id = state.get("current_node")
         
         failure_node_id = current_node_id if (execution_status == "failed" or errors) and current_node_id else None
@@ -243,7 +263,16 @@ class SupervisorAgent(BaseAgent):
                 # move to next node
                 continue
             if node_data.get("kind") in {"router", "Router"}:
-                completed_stages.append(str(label))
+                router_failed = terminal_node_status.get(node_id) == "failed" or (
+                    node_id in failed_node_ids_state
+                    or (failure_node_id and node_id == failure_node_id and node_id not in skipped_nodes)
+                )
+                if router_failed:
+                    failed_stages.append(str(label))
+                elif node_id in skipped_nodes:
+                    skipped_stages.append(str(label))
+                else:
+                    completed_stages.append(str(label))
                 marked_nodes.add(node_id)
                 branches = branch_outgoing.get(node_id, {})
                 taken = None
@@ -258,7 +287,7 @@ class SupervisorAgent(BaseAgent):
                         if n.get("id") == target:
                             target_label = self._display_label(n)
                             break
-                    if target == taken:
+                    if not router_failed and target == taken:
                         if target not in marked_nodes:
                             completed_stages.append(str(target_label or target))
                             marked_nodes.add(target)
@@ -269,12 +298,21 @@ class SupervisorAgent(BaseAgent):
                 continue
             if node_id in marked_nodes:
                 continue
-            if failure_node_id and node_id == failure_node_id:
+            if terminal_node_status.get(node_id) == "failed" or (
+                terminal_node_status.get(node_id) != "completed"
+                and (
+                    node_id in failed_node_ids_state
+                    or (failure_node_id and node_id == failure_node_id and node_id not in skipped_nodes)
+                )
+            ):
                 failed_stages.append(str(label))
             elif node_id in skipped_nodes:
                 skipped_stages.append(str(label))
             elif node_id in executed_nodes:
                 completed_stages.append(str(label))
+            elif execution_status in {"waiting_approval", "pending_manager_approval", "pending"}:
+                # Downstream nodes remain pending while the approval gate is paused.
+                continue
             elif success_index is not None and index <= success_index:
                 completed_stages.append(str(label))
             elif no_messages_detected:
@@ -322,17 +360,28 @@ class SupervisorAgent(BaseAgent):
                 failed_stages.append(node_types.BUDGET_VALIDATION)
 
         if node_types.APPROVAL in available_stages:
-            approval_status = state.get("approval_status")
-            if approval_status == "Approved":
-                completed_stages.append(node_types.APPROVAL)
-            elif approval_status == "Pending Manager Approval":
-                completed_stages.append(node_types.APPROVAL)
-            elif approval_status == "Rejected":
-                failed_stages.append(node_types.APPROVAL)
+            approval_status_raw = state.get("approval_status")
+            approval_status = approval_status_raw.lower().strip() if isinstance(approval_status_raw, str) else None
+            approval_stage_label = next(
+                (
+                    self._display_label(node)
+                    for node in self._workflow_nodes(state)
+                    if ((node.get("data") or {}).get("kind") if isinstance(node.get("data"), dict) else None) in {"approval", "Approval"}
+                ),
+                node_types.APPROVAL,
+            )
+            # treat various pending/queued values as "completed" for the Approval stage (approval node executed and awaiting user action)
+            if approval_status in {"approved", "approved_by_manager", "approved_by_user"}:
+                completed_stages.append(approval_stage_label)
+            elif approval_status in {"pending manager approval", "pending_manager_approval", "waiting_approval", "pending"}:
+                waiting_stages.append(approval_stage_label)
+            elif approval_status in {"rejected", "denied"}:
+                failed_stages.append(approval_stage_label)
             elif approval_status is None:
-                skipped_stages.append(node_types.APPROVAL)
+                skipped_stages.append(approval_stage_label)
             else:
-                failed_stages.append(node_types.APPROVAL)
+                # Any unknown textual value should not be immediately treated as failure; treat as skipped to be conservative
+                skipped_stages.append(approval_stage_label)
 
         if node_types.PURCHASE_ORDER in available_stages:
             purchase_order_generated = state.get("purchase_order_generated")
@@ -349,7 +398,9 @@ class SupervisorAgent(BaseAgent):
 
         failed_stages = list(dict.fromkeys(failed_stages))
 
-        if execution_status == "failed" or errors:
+        if execution_status in {"waiting_approval", "pending_manager_approval", "pending"}:
+            workflow_health = "Waiting for Approval"
+        elif execution_status == "failed" or errors:
             workflow_health = "Failed"
         elif state.get("approval_status") == "Pending Manager Approval" and not state.get("purchase_order_generated"):
             workflow_health = "Warning"
@@ -373,19 +424,226 @@ class SupervisorAgent(BaseAgent):
             summary_parts.append(f"Failed stages: {', '.join(failed_stages)}")
         if skipped_stages:
             summary_parts.append(f"Skipped stages: {', '.join(skipped_stages)}")
+        if waiting_stages:
+            summary_parts.append(f"Waiting stages: {', '.join(waiting_stages)}")
         workflow_summary = " | ".join(summary_parts)
 
+        # Build node-level metrics and timeline from instrumentation (node_metrics)
+        node_metrics_map = state.get("node_metrics") or {}
+        workflow_node_list = self._workflow_nodes(state)
+        workflow_node_ids = [
+            node.get("id")
+            for node in workflow_node_list
+            if isinstance(node.get("id"), str)
+        ]
+        executed_node_ids = {
+            node_id for node_id in (state.get("executed_nodes") or []) if isinstance(node_id, str)
+        }
+        failed_node_ids = {
+            node_id for node_id in (state.get("failed_node_ids") or []) if isinstance(node_id, str)
+        }
+        skipped_node_ids = {
+            node_id for node_id in (state.get("skipped_nodes") or []) if isinstance(node_id, str)
+        }
+        node_details: list[dict[str, Any]] = []
+        timeline: list[dict[str, Any]] = []
+        durations: list[int] = []
+        total_nodes = 0
+        completed_nodes_count = 0
+        failed_nodes_count = 0
+        pending_nodes_count = 0
+        skipped_nodes_count = 0
+        total_retries = 0
+
+        # map node id -> node meta for display
+        node_meta_map = {node.get("id"): node for node in self._workflow_nodes(state)}
+
+        for nid in workflow_node_ids:
+            metrics = node_metrics_map.get(nid) or {}
+            total_nodes += 1
+            node_obj = node_meta_map.get(nid) or {}
+            node_data = node_obj.get("data") if isinstance(node_obj.get("data"), dict) else {}
+            node_kind = node_data.get("kind") or node_obj.get("type")
+            node_name = self._display_label(node_obj) if node_obj else str(nid)
+
+            start_time = metrics.get("start_time")
+            end_time = metrics.get("end_time")
+            duration = metrics.get("duration_ms")
+            status = metrics.get("status")
+            if nid in failed_node_ids or terminal_node_status.get(nid) == "failed":
+                status = "failed"
+            elif nid in skipped_node_ids:
+                status = "skipped"
+            elif terminal_node_status.get(nid) is not None:
+                status = terminal_node_status[nid]
+            if terminal_node_status.get(nid) == "completed" and nid not in failed_node_ids and nid not in skipped_node_ids:
+                status = "completed"
+            elif status in {"failed", "skipped"}:
+                status = status
+            elif status in {"completed", "success", "succeeded"} or nid in executed_node_ids:
+                status = "completed"
+            elif status in {"waiting_approval", "pending_manager_approval", "pending"}:
+                status = "waiting_approval"
+            else:
+                status = "pending"
+            warnings = metrics.get("warnings") or []
+            errors_list = metrics.get("errors") or []
+            retry_count = int(metrics.get("retry_count") or 0)
+            output_summary = metrics.get("output_summary")
+
+            node_details.append({
+                "node_id": nid,
+                "node_name": node_name,
+                "node_type": str(node_kind) if node_kind is not None else "unknown",
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_ms": duration,
+                "status": status,
+                "warnings": warnings,
+                "errors": errors_list,
+                "retry_count": retry_count,
+                "output_summary": output_summary,
+            })
+
+            # timeline: started and completed events
+            if start_time:
+                timeline.append({"timestamp": start_time, "node_id": nid, "node_name": node_name, "event": "started"})
+            if end_time:
+                timeline.append({
+                    "timestamp": end_time,
+                    "node_id": nid,
+                    "node_name": node_name,
+                    "event": "failed" if status == "failed" else "completed",
+                    "duration_ms": duration,
+                })
+
+            if isinstance(duration, int):
+                durations.append(duration)
+            if status == "completed":
+                completed_nodes_count += 1
+            elif status == "failed":
+                failed_nodes_count += 1
+            elif status == "skipped":
+                skipped_nodes_count += 1
+            else:
+                pending_nodes_count += 1
+
+            total_retries += retry_count
+
+        # sort timeline by timestamp
+        try:
+            timeline.sort(key=lambda e: e.get("timestamp") or "")
+        except Exception:
+            pass
+
+        # compute metrics
+        average_latency = int(sum(durations) / len(durations)) if durations else 0
+        total_execution_time = 0
+        if durations:
+            total_execution_time = sum(durations)
+
+        workflow_completion_pct = int((completed_nodes_count / total_nodes) * 100) if total_nodes > 0 else 0
+        current_running_node = next(
+            (
+                detail["node_id"]
+                for detail in node_details
+                if detail.get("status") in {"running", "active", "waiting_approval"}
+            ),
+            None,
+        )
+        completed_node_ids = [
+            detail["node_id"] for detail in node_details if detail.get("status") == "completed"
+        ]
+        failed_node_ids_list = [
+            detail["node_id"] for detail in node_details if detail.get("status") == "failed"
+        ]
+        pending_node_ids = [
+            detail["node_id"] for detail in node_details if detail.get("status") == "pending"
+        ]
+
+        supervisor_metrics = {
+            "total_execution_time_ms": total_execution_time,
+            "average_node_latency_ms": average_latency,
+            "completed_nodes": completed_nodes_count,
+            "failed_nodes": failed_nodes_count,
+            "pending_nodes": pending_nodes_count,
+            "skipped_nodes": skipped_nodes_count,
+            "retry_count": total_retries,
+            "workflow_completion_pct": workflow_completion_pct,
+            "current_running_node": current_running_node,
+        }
+
+        # Determine health more holistically
+        # If failure detection already populated failure info, preserve existing workflow_health
+        preserve_failure = False
+        if state.get("failure_category") and str(state.get("failure_category")).strip() and str(state.get("failure_category")).lower() != "none":
+            preserve_failure = True
+
+        if not preserve_failure:
+            if failed_nodes_count > 0 or (state.get("execution_status") == "failed"):
+                workflow_health = "Failed"
+            elif state.get("approval_status") in {"waiting_approval", "Pending Manager Approval"}:
+                workflow_health = "Waiting for Approval"
+            elif (
+                total_nodes > 0
+                and completed_nodes_count == total_nodes
+                and failed_nodes_count == 0
+                and pending_nodes_count == 0
+                and skipped_nodes_count == 0
+            ):
+                workflow_health = "Healthy"
+            else:
+                workflow_health = workflow_health
+        else:
+            # preserve any workflow_health value set by failure detection or earlier agents
+            workflow_health = state.get("workflow_health", workflow_health)
+
+        summary_parts = [f"Workflow health: {workflow_health}"]
+        if completed_stages:
+            summary_parts.append(f"Completed stages: {', '.join(completed_stages)}")
+        if failed_stages:
+            summary_parts.append(f"Failed stages: {', '.join(failed_stages)}")
+        if skipped_stages:
+            summary_parts.append(f"Skipped stages: {', '.join(skipped_stages)}")
+        workflow_summary = " | ".join(summary_parts)
+
+        # Human readable summary
+        summary_lines: list[str] = []
+        if completed_nodes_count > 0:
+            summary_lines.append(f"{completed_nodes_count} nodes completed.")
+        if failed_nodes_count > 0:
+            summary_lines.append(f"{failed_nodes_count} nodes failed.")
+        if skipped_nodes_count > 0:
+            summary_lines.append(f"{skipped_nodes_count} nodes skipped.")
+        if total_retries > 0:
+            summary_lines.append(f"{total_retries} retries recorded.")
+        if not summary_lines:
+            summary_lines.append("No notable events detected.")
+        supervisor_summary = " ".join(summary_lines)
+
+        execution_log = [
+            entry for entry in execution_log
+            if not entry.startswith("Workflow health:")
+        ]
         execution_log.append(f"Workflow health: {workflow_health}")
         execution_log.append(workflow_summary)
 
+        # merge back into state
         state["workflow_health"] = workflow_health
         state["completed_stages"] = completed_stages
         state["failed_stages"] = failed_stages
         state["skipped_stages"] = skipped_stages
-        # computed stage lists
         state["workflow_summary"] = workflow_summary
         state["supervisor_timestamp"] = datetime.now(timezone.utc).isoformat()
         state["execution_log"] = execution_log
+        state["supervisor_timeline"] = timeline
+        state["supervisor_metrics"] = supervisor_metrics
+        state["supervisor_node_details"] = node_details
+        state["supervisor_summary"] = supervisor_summary
+        state["completed_node_ids"] = completed_node_ids
+        state["failed_node_ids"] = failed_node_ids_list
+        state["pending_node_ids"] = pending_node_ids
+        state["current_running_node"] = current_running_node
         if "supervisor_diagnosis" not in state:
             state["supervisor_diagnosis"] = ""
 
